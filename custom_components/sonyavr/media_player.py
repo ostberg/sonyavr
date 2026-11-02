@@ -37,7 +37,7 @@ from .const import (
     SERVICE_SEND_COMMAND,
     SERVICE_UPDATE_STATE,
 )
-from .sonyavr import SOURCE_MENU_MAP, ZONE_FOLLOW_MAIN, ZONE_FOLLOW_MAIN_NAME
+from .sonyavr import ZONE_FOLLOW_MAIN, ZONE_FOLLOW_MAIN_NAME, source_name
 from .source_names import default_name, display_list, display_name
 
 _LOGGER = logging.getLogger(__name__)
@@ -128,7 +128,8 @@ class SonyAVRDevice(MediaPlayerEntity):
         if self._device.state_service.power is None:
             _LOGGER.debug("Power state is uninitialised, so initialising all states")
             _power_state = await self._device.async_get_power_state()
-            _power_cycle = self._config_entry.options.get(CONF_POWER_CYCLE_INIT, True)
+            # Fork change: default off, so an HA restart does not turn the AVR on
+            _power_cycle = self._config_entry.options.get(CONF_POWER_CYCLE_INIT, False)
 
             # Turn on and off to force the feedback
             if not _power_state and _power_cycle:
@@ -418,7 +419,7 @@ class SonyAVRZone(MediaPlayerEntity):
             return None
         if source == ZONE_FOLLOW_MAIN:
             return ZONE_FOLLOW_MAIN_NAME
-        return display_name(SOURCE_MENU_MAP.get(source, source), self._names)
+        return display_name(source_name(source), self._names)
 
     @property
     def is_volume_muted(self):
