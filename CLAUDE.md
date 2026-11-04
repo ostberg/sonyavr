@@ -262,8 +262,11 @@ Merge only after you review the diff (see Security rules). Check
    after an AVR power loss.
 2. Done 4 Nov 2026: Max Volume 30; Show options set (see Status).
 3. Done 4 Nov 2026 (results in Status): live test of the startup probe
-   (fork change 13). The mute problem it found is fork change 15; repeat
-   step b after installing it. Original test plan, for reference: Turn on debug logging for `custom_components.sonyavr`. Before
+   (fork change 13). The mute problem it found is fork change 15, live
+   tested 4 Nov 2026: HA restart with the AVR muted → status 0x23, "AVR is
+   muted, so the volume probe is not sent", AVR stayed muted (volume
+   unknown until unmute; Peter's HA asks again after an unmute). Original
+   test plan, for reference: Turn on debug logging for `custom_components.sonyavr`. Before
    each step, note the volume number on the AVR display.
    a. AVR on, input TV, not muted: reload the integration. The sound must
       not stop, the input must not change, the AVR display may show the
