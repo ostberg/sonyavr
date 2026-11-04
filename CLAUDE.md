@@ -155,10 +155,15 @@ Merge only after you review the diff (see Security rules). Check
 - 2 Nov 2026: fork created; fixes 1 to 12 written on branch
   `ostberg-fixes`; syntax check and frame tests pass. Not yet tested on
   the STR-DN1040.
+- 3 Nov 2026: branch pushed; pull request #1 (`ostberg-fixes` → `main`)
+  open. Syntax check, frame tests (10/10) and protocol smoke test (5/5)
+  pass. The `asyncping3` 5.1.3 wheel matched the SHA-256 above. Not yet
+  tested on the STR-DN1040.
 
 ## Next steps
 
-1. Merge `ostberg-fixes` into `main` of the fork (HACS installs `main`).
+1. Merge pull request #1 (`ostberg-fixes`) into `main` of the fork (HACS
+   installs `main`).
 2. Install with HACS and test on the STR-DN1040: power, mute, volume,
    input, Max Volume cap, behavior after an AVR power loss.
 3. If the tests pass, think about pull requests to upstream for fixes 1, 2,
