@@ -210,16 +210,36 @@ Merge only after you review the diff (see Security rules). Check
   merged. Syntax check, frame tests (10/10) and protocol smoke test (9/9)
   pass; the new startup tests fail on the old code (a muted AVR became
   unmuted). Not yet tested on the STR-DN1040.
+- 4 Nov 2026: pull request #2 merged (`a547b99`) and installed in HA with
+  HACS. Options now: Max Volume 30; inputs shown TV, CD, Game; sound modes
+  A.F.D., 2 Channels, Multi Stereo, HD DCS, PL-II Movie. Live test of the
+  startup probe on the STR-DN1040 (debug log):
+  - The DN1040 answers the status request: `A0 82` gives `A8 82 00 <input>
+    ... <status>`, status 0x21 = on, 0x23 = on and muted, 0x20 = standby.
+  - HA restart and reload with the AVR on and not muted: no mute or input
+    command; one volume down (only shows the volume on model 3); volume
+    stayed 12.
+  - Reload with the AVR muted: the status request reported muted, but the
+    volume-down probe then **unmuted the AVR** (status 0x21 right after the
+    volume command). See Known issues.
+  - Reload with the AVR in standby: status 0x20 (power off), no volume down
+    sent, the AVR stayed off.
+  - A volume status request (`02 03 A0 92 00 CB`) is not supported: the AVR
+    answers NACK (`FE`). So the volume can only be learned from a volume
+    command or a report.
+  - At HA start HA shows the AVR as off for about 13 s until the probe ends
+    (the HA automations wait 20-30 s before acting on "off").
 
 ## Known issues
 
-- **Startup probe on the STR-DN1040 (fork change 13, not live tested).**
-  Two things are not known for this model: (1) whether it answers the
-  status request; (2) whether a standby AVR stays silent on volume down. If
-  (1) fails, after each HA restart the input and mute show as unknown until
-  the AVR reports a change (the Family Room dashboard uses the input). If
-  (2) fails and (1) fails too, HA shows the AVR as on while it is in standby.
-  See Next steps for the live test.
+- **Startup probe unmutes a muted AVR (live test 4 Nov 2026).** The status
+  request works on the DN1040, but `async_update_status` still sends one
+  volume down to learn the volume, and a volume command cancels mute on this
+  AVR. Fix: skip the volume probe when the status request reported muted
+  (volume then stays unknown until the AVR reports a change). Not done yet.
+- **"Off" during start-up.** The media player reads off until the probe
+  ends (about 13 s at an HA restart). Reporting unknown until then would be
+  more correct for automations.
 - **Volume cap at startup.** The startup volume probe reports the volume.
   When it is above Max Volume (for example after the knob was turned while
   HA was down), the integration sets it back to Max Volume. This is the
@@ -240,10 +260,10 @@ Merge only after you review the diff (see Security rules). Check
 1. Live tests on the STR-DN1040: power on from standby, power off, mute,
    volume, input, Max Volume cap (turn the knob above the cap), behavior
    after an AVR power loss.
-2. Set Max Volume (Peter wants a value much lower than 45). Configure →
-   Show: hide the inputs that are not used.
-3. Live test of the startup probe (fork change 13), when nobody is
-   watching. Turn on debug logging for `custom_components.sonyavr`. Before
+2. Done 4 Nov 2026: Max Volume 30; Show options set (see Status).
+3. Done 4 Nov 2026 (results in Status): live test of the startup probe
+   (fork change 13). Next: fix the volume probe when muted (Known issues),
+   then repeat step b. Original test plan, for reference: Turn on debug logging for `custom_components.sonyavr`. Before
    each step, note the volume number on the AVR display.
    a. AVR on, input TV, not muted: reload the integration. The sound must
       not stop, the input must not change, the AVR display may show the
