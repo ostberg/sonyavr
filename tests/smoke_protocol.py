@@ -63,9 +63,10 @@ class FakeAVR:
     With a state it acts like a volume model 3 AVR: it applies power, mute,
     input and volume commands and reports changes on all connections. The
     first volume down only opens the volume display; a second one while the
-    display is open lowers the volume. When status_request is True it answers
-    the status request, only on the connection that asked; when False it
-    answers with NACK (0xFE). In standby it answers only the status request.
+    display is open lowers the volume. A volume command cancels mute, as on
+    the STR-DN1040 (live test, 4 Nov 2026). When status_request is True it
+    answers the status request, only on the connection that asked; when False
+    it answers with NACK (0xFE). In standby it answers only the status request.
     """
 
     def __init__(self, state=None, status_request=True):
@@ -127,6 +128,9 @@ class FakeAVR:
             st["source"] = SOURCE_BY_CODE.get(cmd[5], st["source"])
             await self.report_source()
         elif cmd in (bytes(s.CMD_VOLUME_DOWN), bytes(s.CMD_VOLUME_UP)):
+            if st["muted"]:
+                st["muted"] = False
+                await self.report_source()
             if now < self.display_until:
                 st["volume"] += -1 if cmd == bytes(s.CMD_VOLUME_DOWN) else 1
             self.display_until = now + 5
@@ -145,10 +149,10 @@ CHANGING_COMMANDS = [
 ]
 
 
-async def startup(label, state, status_request, expect):
+async def startup(label, state, status_request, expect, after=None):
     """Run the startup probe as media_player._async_startup does (power cycle
-    off) and check that the fake AVR did not change."""
-    before = dict(state)
+    off) and check that the fake AVR did not change (or changed to after)."""
+    before = dict(after if after is not None else state)
     fake = FakeAVR(state, status_request)
     server = await asyncio.start_server(fake.handle, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
@@ -189,7 +193,8 @@ async def startup(label, state, status_request, expect):
 
 async def startup_tests():
     # 6. AVR on and muted, status request answered: input, power and mute
-    # from the answer, volume from one volume down, nothing changed
+    # from the answer; no volume down, because it would cancel mute (fork
+    # change 15), so the volume stays unknown; nothing changed
     await startup(
         "on, muted, status request answered",
         {"power": True, "muted": True, "source": "game", "volume": 20},
@@ -199,13 +204,14 @@ async def startup_tests():
             "state_power": True,
             "muted": True,
             "source": "game",
-            "volume": 20,
-            "volume_down": 1,
+            "volume": None,
+            "volume_down": 0,
         },
     )
-    # 7. AVR on and muted, no status request (NACK): power from volume down,
-    # input and mute stay unknown (mute not set False by the first volume
-    # report), and only one volume down (a second one would lower it)
+    # 7. AVR on and muted, no status request (NACK): the only way to find out
+    # that it is on is one volume down, which cancels mute. Unavoidable without
+    # the status request (the STR-DN1040 answers it). Only one volume down
+    # (a second one would lower the volume).
     await startup(
         "on, muted, no status request",
         {"power": True, "muted": True, "source": "tv", "volume": 12},
@@ -213,8 +219,24 @@ async def startup_tests():
         {
             "power": True,
             "state_power": True,
-            "muted": None,
-            "source": None,
+            "muted": False,
+            "source": "tv",
+            "volume": 12,
+            "volume_down": 1,
+        },
+        after={"power": True, "muted": False, "source": "tv", "volume": 12},
+    )
+    # 10. AVR on, not muted, status request answered: volume from one volume
+    # down (only opens the display), nothing changed
+    await startup(
+        "on, not muted, status request answered",
+        {"power": True, "muted": False, "source": "tv", "volume": 12},
+        True,
+        {
+            "power": True,
+            "state_power": True,
+            "muted": False,
+            "source": "tv",
             "volume": 12,
             "volume_down": 1,
         },

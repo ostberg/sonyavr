@@ -1968,12 +1968,21 @@ class SonyAVR:
         known (an AVR that was muted became unmuted), and input up and down
         when the input was not known (these sent nothing, because they need a
         known input). Now: the status request, then the volume probe when the
-        AVR is not known to be off.
+        AVR is on (or its power is not known) and not muted.
+
+        Fork change 15: no volume probe while the AVR is muted. A volume
+        command cancels mute on the STR-DN1040 (live test, 4 Nov 2026), so the
+        probe unmuted a muted AVR. The volume then stays unknown until the AVR
+        reports it.
         """
         _LOGGER.debug("Updating Initial States")
         await self.async_request_status()
-        if self.state_service.power is not False:
-            await self._async_volume_probe()
+        if self.state_service.power is False:
+            return
+        if self.state_service.muted:
+            _LOGGER.debug("AVR is muted, so the volume probe is not sent")
+            return
+        await self._async_volume_probe()
 
     async def async_get_power_state(self):
         """Find out if the AVR is on, without changing what it plays.

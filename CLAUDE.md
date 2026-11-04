@@ -109,6 +109,7 @@ Protocol notes:
 | 12 | Removed the unused local IP lookup (UDP connect to 8.8.8.8). | Dead code. It sent no packets, but it looked like an external connection. |
 | 13 | Startup probe without mute or input commands. First the status request (input, power, mute). If the AVR does not answer it, one volume down (power and volume only; input and mute stay unknown until the AVR reports them). The volume probe is not sent twice within 10 s. | Upstream sent mute then unmute (1 s of silence, and a muted AVR became unmuted). Its input up and down step sent nothing (it needs a known input), so it only waited 4 s. |
 | 14 | The first volume report does not set mute to off. | Upstream treats a volume increase as "unmuted", and the first report counted as an increase from 0. Upstream hid this with the mute probe. |
+| 15 | No startup volume probe while the AVR is muted (the volume stays unknown until the AVR reports it). | A volume command cancels mute on the STR-DN1040, so the probe unmuted a muted AVR (live test, 4 Nov 2026). |
 
 The splitter only changes a read when the whole read divides exactly into
 valid packets. In all other cases it passes the read unchanged (upstream
@@ -232,11 +233,10 @@ Merge only after you review the diff (see Security rules). Check
 
 ## Known issues
 
-- **Startup probe unmutes a muted AVR (live test 4 Nov 2026).** The status
-  request works on the DN1040, but `async_update_status` still sends one
-  volume down to learn the volume, and a volume command cancels mute on this
-  AVR. Fix: skip the volume probe when the status request reported muted
-  (volume then stays unknown until the AVR reports a change). Not done yet.
+- **Startup probe and mute.** Fixed by fork change 15 when the AVR answers
+  the status request (the DN1040 does). An AVR that does not answer it still
+  gets one volume down, which cancels mute on this model (no other way to
+  find out that it is on).
 - **"Off" during start-up.** The media player reads off until the probe
   ends (about 13 s at an HA restart). Reporting unknown until then would be
   more correct for automations.
@@ -262,8 +262,8 @@ Merge only after you review the diff (see Security rules). Check
    after an AVR power loss.
 2. Done 4 Nov 2026: Max Volume 30; Show options set (see Status).
 3. Done 4 Nov 2026 (results in Status): live test of the startup probe
-   (fork change 13). Next: fix the volume probe when muted (Known issues),
-   then repeat step b. Original test plan, for reference: Turn on debug logging for `custom_components.sonyavr`. Before
+   (fork change 13). The mute problem it found is fork change 15; repeat
+   step b after installing it. Original test plan, for reference: Turn on debug logging for `custom_components.sonyavr`. Before
    each step, note the volume number on the AVR display.
    a. AVR on, input TV, not muted: reload the integration. The sound must
       not stop, the input must not change, the AVR display may show the
