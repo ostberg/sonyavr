@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Any
 
@@ -60,7 +61,8 @@ OPTIONS_SCHEMA = probatio.Schema(
             ),
             probatio.Coerce(int),
         ),
-        probatio.Optional(CONF_POWER_CYCLE_INIT, default=True): BooleanSelector(),
+        # Fork change: default off, so an HA restart does not turn the AVR on
+        probatio.Optional(CONF_POWER_CYCLE_INIT, default=False): BooleanSelector(),
         probatio.Optional(CONF_ZONES): SelectSelector(
             SelectSelectorConfig(
                 options=["Zone 2", "Zone 3"],
@@ -112,6 +114,32 @@ async def validate_auth(hass: core.HomeAssistant, data: dict) -> None:
     ):
         # Manual entry requires host and name
         raise ValueError
+    # Fork change: the port must be a number (int() raises ValueError)
+    port = int(data["port"])
+    if not 0 < port < 65536:
+        raise ValueError
+
+
+class CannotConnect(Exception):
+    """The AVR did not accept a TCP connection."""
+
+
+async def async_check_connection(host: str, port: int) -> None:
+    """Fork change: check that the AVR accepts a connection before saving.
+
+    Raises CannotConnect. The connection is closed at once.
+    """
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=5.0
+        )
+    except (OSError, TimeoutError) as err:
+        raise CannotConnect from err
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except OSError:
+        pass
 
 
 class SonyAVRConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -125,6 +153,17 @@ class SonyAVRConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await validate_auth(self.hass, user_input)
             except ValueError:
                 errors["base"] = "data"
+            if not errors:
+                # Fork change: one entry per AVR, and test the connection
+                user_input[CONF_HOST] = user_input[CONF_HOST].strip()
+                await self.async_set_unique_id(user_input[CONF_HOST])
+                self._abort_if_unique_id_configured()
+                try:
+                    await async_check_connection(
+                        user_input[CONF_HOST], int(user_input[CONF_PORT])
+                    )
+                except CannotConnect:
+                    errors["base"] = "cannot_connect"
             if not errors:
                 # Input is valid, set data.
                 self.data = user_input
@@ -167,7 +206,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 {
                     CONF_MAX_VOLUME: options.get(CONF_MAX_VOLUME),
                     CONF_PING_INTERVAL: options.get(CONF_PING_INTERVAL, 60),
-                    CONF_POWER_CYCLE_INIT: options.get(CONF_POWER_CYCLE_INIT, True),
+                    CONF_POWER_CYCLE_INIT: options.get(CONF_POWER_CYCLE_INIT, False),
                     CONF_ZONES: options.get(CONF_ZONES, []),
                 },
             ),

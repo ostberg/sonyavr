@@ -2,7 +2,8 @@
   "title": "Sony AVR",
   "config": {
     "error": {
-      "data": "You must enter the IP address, name, model and port of the AVR"
+      "data": "You must enter the IP address, name, model and port (a number) of the AVR",
+      "cannot_connect": "Cannot connect to the AVR. Check the IP address and port, and set Network Standby to On in the AVR network settings."
     },
     "step": {
       "user": {
@@ -15,6 +16,9 @@
         "description": "Enter the details for your AVR.",
         "title": "Sony AVR"
       }
+    },
+    "abort": {
+      "already_configured": "This AVR is already configured."
     }
   },
   "options": {

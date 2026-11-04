@@ -20,8 +20,30 @@ from .const import (
     STR_DA5800ES_VOLUME_STEP,
     VOLUME_STEP,
 )
+from .feedback_frames import split_feedback
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _enable_keepalive(writer):
+    """Turn on TCP keepalive, so that a dead connection is found without traffic.
+
+    Fork change: without keepalive a connection to an AVR that lost power could
+    stay open (and silent) for a long time.
+    """
+    try:
+        sock = writer.get_extra_info("socket")
+        if sock is None:
+            return
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
+        if hasattr(socket, "TCP_KEEPINTVL"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+        if hasattr(socket, "TCP_KEEPCNT"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+    except OSError as e:
+        _LOGGER.debug("Cannot enable TCP keepalive: %s", e)
 
 # logging.basicConfig(level = logging.DEBUG, format = "%(asctime)-15s [%(name)-5s] [%(levelname)-5s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
@@ -38,6 +60,8 @@ RECONNECT_DELAY_MAX = 60
 # long, before reloading.
 PORT_READY_TIMEOUT = 300
 PORT_READY_POLL = 5
+# Fork change: used when the ping interval option was never saved
+DEFAULT_PING_INTERVAL = 60
 
 
 SOURCE_NAMES = [
@@ -475,6 +499,20 @@ SOURCE_MENU_MAP = {
     # 	"googleCast": "Google Cast",
 }
 
+# Fork change: inputs that the AVR can report in feedback but that are not
+# offered in the input list. Before, feedback for these caused KeyError in
+# SonyAVR.source.
+SOURCE_FEEDBACK_ONLY_NAMES = {
+    "bluetooth": "Bluetooth",
+    "screenMirroring": "Screen Mirroring",
+    "googleCast": "Google Cast",
+}
+
+
+def source_name(key):
+    """Default display name for a source key. Never raises KeyError."""
+    return SOURCE_MENU_MAP.get(key) or SOURCE_FEEDBACK_ONLY_NAMES.get(key, key)
+
 SOUND_FIELD_MENU_MAP = {
     "twoChannelStereo": "2 Channels",
     "analogDirect": "Analog Direct",
@@ -814,6 +852,32 @@ class CommandService:
         self.scroll_step_volume = 1
         self.command_writer: asyncio.StreamWriter | None = None
         self.command_reader: asyncio.StreamReader | None = None
+        self._drain_task: asyncio.Task | None = None
+
+    async def _async_drain(self, reader, writer):
+        """Read and discard data that the AVR sends on the command socket.
+
+        Fork change: the AVR sends feedback on every open connection, also on
+        this one. Nothing read it, so the data stayed in the socket buffers.
+        The feedback socket handles state; here the data is only discarded.
+        When the AVR closes the connection, clear the writer so that the next
+        command reconnects at once.
+        """
+        try:
+            while True:
+                data = await reader.read(BUFFER_SIZE)
+                if not data:
+                    break
+        except OSError as e:
+            _LOGGER.debug("Command socket read error: %s", e)
+        if self.command_writer is writer:
+            _LOGGER.debug("Command socket closed by AVR, reconnect on next command")
+            self.command_writer = None
+            self.command_reader = None
+            try:
+                writer.close()
+            except OSError:
+                pass
 
     async def async_connect(self):
         try:
@@ -821,6 +885,10 @@ class CommandService:
             self.command_reader, self.command_writer = await asyncio.wait_for(
                 asyncio.open_connection(self.device_service.ip, self.port),
                 timeout=5.0,  # Set your timeout in seconds here
+            )
+            _enable_keepalive(self.command_writer)
+            self._drain_task = asyncio.get_running_loop().create_task(
+                self._async_drain(self.command_reader, self.command_writer)
             )
 
         except TimeoutError:
@@ -845,6 +913,9 @@ class CommandService:
         await self.async_connect()
 
     async def async_disconnect(self):
+        task, self._drain_task = self._drain_task, None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
         try:
             if self.command_writer is not None:
                 self.command_writer.close()
@@ -923,8 +994,25 @@ class CommandService:
                 self.state_service.update_hdmiout(True)
 
     async def async_set_volume(self, vol):
+        # Fork change: accept text or numbers (the send_command service passes
+        # text), clamp to min and max for both models, and do not send until
+        # the volume model is known (the two models use different formats).
+        try:
+            vol = float(vol)
+        except (TypeError, ValueError):
+            _LOGGER.error('Volume "%s" is not a number', vol)
+            return
+        if self.state_service.volume_model is None:
+            _LOGGER.warning("Volume model not known yet, volume command not sent")
+            return
         if self.state_service.volume_model == 3:
             # Normal Volume Model
+            _vol = int(
+                max(
+                    min(vol, self.state_service.volume_max),
+                    self.state_service.volume_min,
+                )
+            )
             cmd = bytearray(
                 [
                     0x02,
@@ -934,24 +1022,24 @@ class CommandService:
                     0x00,
                     0x03,
                     0x00,
-                    min(int(vol), int(self.state_service.volume_max)),
+                    _vol,
                     0x00,
                 ]
             )
         else:
             # Volume Model with float
             # convert vol to closest .0 or .5
-            _vol = round(float(vol) * 2) / 2
+            _vol = round(vol * 2) / 2
             _vol = max(
                 min(_vol, self.state_service.volume_max), self.state_service.volume_min
             )
+            # Use the rounded and clamped value for the 0.5 step flag
+            half = (_vol % 1) == 0.5
 
             # When the volume is .5, avr always adds .5 to result, so subtract 1 for -ve's
 
             _vol_byte = (
-                int(_vol)
-                if _vol > 0
-                else int(_vol) + 256 - (1 if (vol % 1) == 0.5 else 0)
+                int(_vol) if _vol > 0 else int(_vol) + 256 - (1 if half else 0)
             )
 
             cmd = bytearray(
@@ -962,15 +1050,19 @@ class CommandService:
                     0x52,
                     0x00,
                     0x01,
-                    _vol_byte,
-                    0x80 if (vol % 1) == 0.5 else 0x00,
+                    _vol_byte & 0xFF,
+                    0x80 if half else 0x00,
                     0x00,
                 ]
             )
         await self.async_send_command(cmd)
-        self.state_service.update_volume(vol)
+        self.state_service.update_volume(_vol)
 
     async def async_volume_up(self):
+        if self.state_service.volume is None:
+            # Fork change: volume not reported yet (was TypeError)
+            await self.async_send_command(CMD_VOLUME_UP)
+            return
         target_volume = self.state_service.volume + self.scroll_step_volume
         if target_volume <= self.state_service.volume_max:
             # Some of the older AVRs require the volume menu to be displayed on the AVR before up and down work, so use direct setting instead
@@ -980,6 +1072,10 @@ class CommandService:
                 await self.async_send_command(CMD_VOLUME_UP)
 
     async def async_volume_down(self):
+        if self.state_service.volume is None:
+            # Fork change: volume not reported yet (was TypeError)
+            await self.async_send_command(CMD_VOLUME_DOWN)
+            return
         target_volume = self.state_service.volume - self.scroll_step_volume
         if target_volume >= self.state_service.volume_min:
             if self.state_service.volume_model == 3:
@@ -1035,19 +1131,8 @@ class DeviceService:
     logger = logging.getLogger("dev")
 
     def __init__(self):
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(0)
-        try:
-            # doesn't even have to be reachable
-            s.connect(("8.8.8.8", 53))
-            _ip = s.getsockname()[0]
-        except Exception:
-            _ip = "127.0.0.1"
-        finally:
-            s.close()
-
-        self.my_ip = _ip
-        _LOGGER.debug(f"IP: {self.my_ip}")
+        # Fork change: removed an unused lookup of the local IP address (UDP
+        # connect to 8.8.8.8). It sent no packets and nothing used the result.
         self.initialized = False
 
         self.ip = None
@@ -1121,7 +1206,15 @@ class FeedbackWatcher:
 
             if vol <= self.state_service.volume_max:
                 self.state_service.update_volume(vol)
-            elif vol == self.state_service.volume_max + 1:
+            else:
+                # Fork change: cap any volume above Max Volume. Upstream only
+                # acted at exactly Max + 1, so a fast knob turn (more than one
+                # step in one report) went past the cap.
+                _LOGGER.debug(
+                    "Volume %s above Max Volume %s, setting it back",
+                    vol,
+                    self.state_service.volume_max,
+                )
                 self.command_service.block_sending = False
                 await self.command_service.async_set_volume(
                     self.state_service.volume_max
@@ -1283,6 +1376,7 @@ class FeedbackWatcher:
                 asyncio.open_connection(self.device_service.ip, self.port),
                 timeout=5.0,  # Set your timeout in seconds here
             )
+            _enable_keepalive(self.writer)
             self._connected = True
         except asyncio.TimeoutError:
             _LOGGER.critical(
@@ -1325,6 +1419,7 @@ class FeedbackWatcher:
                     asyncio.open_connection(self.device_service.ip, self.port),
                     timeout=5.0,
                 )
+                _enable_keepalive(self.writer)
                 self.command_service.block_sending = False
                 _LOGGER.warning("Feedback listener reconnected")
                 return True
@@ -1352,6 +1447,37 @@ class FeedbackWatcher:
         except Exception:
             _LOGGER.exception("Unknown error on listener close %s", sys.exc_info()[0])
 
+    async def _process_packet(self, data):
+        """Apply one feedback packet to the state and notify the entities."""
+        self.debug_data(data)
+
+        zone = self.check_zone(data)
+        if zone is not None:
+            if cb := self.sony_avr._zone_update_cbs.get(zone):
+                cb()
+            return
+
+        if (
+            not self.check_timer(data)
+            and not self.check_source(data)
+            and not self.check_sound_field(data)
+            and not self.check_pure_direct(data)
+            and not self.check_sound_optimizer(data)
+            and not self.check_fmtuner(data)
+            and not await self.check_volume(data)
+            and not self.check_auto_standby(data)
+            and not self.check_auto_phase_matching(data)
+            and not self.ended
+        ):
+            self.debug_data(data, "[unknown data packet]")
+        else:
+            if self.sony_avr._update_cb:
+                self.sony_avr._update_cb()
+            if self.sony_avr._remote_update_cb:
+                self.sony_avr._remote_update_cb()
+            if self.sony_avr._sensor_update_cb:
+                self.sony_avr._sensor_update_cb()
+
     async def run(self):
         # The AVR may still be booting (e.g. on reload after power is restored),
         # so keep retrying rather than giving up and never listening.
@@ -1365,6 +1491,9 @@ class FeedbackWatcher:
                 data = await self.reader.read(BUFFER_SIZE)
 
                 if not data:
+                    if self.ended:
+                        # stop() closed the connection; not an AVR problem
+                        break
                     # Empty read means the AVR closed the connection
                     _LOGGER.warning("Feedback connection closed by AVR, reconnecting")
                     if not await self.reconnect():
@@ -1374,38 +1503,22 @@ class FeedbackWatcher:
                 # Prevent feedback loops by block sending commands
                 self.command_service.block_sending = True
 
-                if not self.ended:
-                    self.debug_data(data)
-
-                zone = self.check_zone(data)
-                if zone is not None:
-                    if cb := self.sony_avr._zone_update_cbs.get(zone):
-                        cb()
-                    continue
-
-                if (
-                    not self.check_timer(data)
-                    and not self.check_source(data)
-                    and not self.check_sound_field(data)
-                    and not self.check_pure_direct(data)
-                    and not self.check_sound_optimizer(data)
-                    and not self.check_fmtuner(data)
-                    and not await self.check_volume(data)
-                    and not self.check_auto_standby(data)
-                    and not self.check_auto_phase_matching(data)
-                    and not self.ended
-                ):
-                    self.debug_data(data, "[unknown data packet]")
-                else:
-                    if self.sony_avr._update_cb:
-                        self.sony_avr._update_cb()
-                    if self.sony_avr._remote_update_cb:
-                        self.sony_avr._remote_update_cb()
-                    if self.sony_avr._sensor_update_cb:
-                        self.sony_avr._sensor_update_cb()
+                # Fork change: one read can hold more than one packet.
+                for packet in split_feedback(data):
+                    if self.ended:
+                        break
+                    try:
+                        await self._process_packet(packet)
+                    except Exception:
+                        # A packet the code cannot handle is not a connection
+                        # problem, so log it and continue (no reconnect).
+                        _LOGGER.exception(
+                            "Failed to process packet %s",
+                            binascii.hexlify(packet, ":"),
+                        )
 
             except Exception:
-                _LOGGER.exception("Failed to process data: reconnecting...")
+                _LOGGER.exception("Failed to read data: reconnecting...")
                 await self.reconnect()
             finally:
                 # Unblock sending commands after processing
@@ -1461,9 +1574,23 @@ class PingWatcherService:
             PORT_READY_TIMEOUT,
         )
 
+    def _interval(self):
+        """Ping interval in seconds. 0 disables the watcher.
+
+        Fork change: default to 60 s when the option was never saved. Before,
+        int(None) raised TypeError and stopped the watcher.
+        """
+        value = self._config_entry.options.get(CONF_PING_INTERVAL)
+        if value is None:
+            return DEFAULT_PING_INTERVAL
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            return DEFAULT_PING_INTERVAL
+
     async def start(self):
         while not self._stop:
-            if int(self._config_entry.options.get(CONF_PING_INTERVAL)) == 0:
+            if self._interval() == 0:
                 # Disable the listener
                 _LOGGER.info("Ping Watcher disabled.  Reload config to re-enable")
                 self._stop = True
@@ -1477,7 +1604,7 @@ class PingWatcherService:
             if _ping:
                 # Ping succeeded - wait and retry
                 await asyncio.sleep(
-                    int(self._config_entry.options.get(CONF_PING_INTERVAL, 60))
+                    self._interval()
                 )
             else:
                 # Both attempts failed, so break
@@ -1488,14 +1615,14 @@ class PingWatcherService:
                 "Connectivity lost to %s.  Waiting for availability.", self._host
             )
         while not await ping(self._host, timeout=1) and not self._stop:
-            if int(self._config_entry.options.get(CONF_PING_INTERVAL)) == 0:
+            if self._interval() == 0:
                 _LOGGER.info("Ping Watcher disabled.  Reload config to re-enable")
                 # Disable the listener
                 self._stop = True
                 break
             # Ping failed - wait and retry
             await asyncio.sleep(
-                int(self._config_entry.options.get(CONF_PING_INTERVAL, 60))
+                self._interval()
             )
         # Ping succeeded, so it's back, so reload
         if not self._stop:
@@ -1644,13 +1771,24 @@ class SonyAVR:
                     _LOGGER.error("You must specific a source")
                     return
                 if value not in SOURCE_MENU_MAP.values():
-                    _LOGGER.error('Sound field "%s" is not a valid sound field' % value)
+                    _LOGGER.error('Source "%s" is not a valid input', value)
                     return
                 await self.async_set_source(value)
             case "Set Volume":
+                if value is None:
+                    _LOGGER.error("You must specify a volume")
+                    return
+                # async_set_volume converts the text value and clamps it
                 await self.async_volume_set(value)
             case "Byte Array String":
-                _byte_command = bytes.fromhex(value)
+                try:
+                    _byte_command = bytes.fromhex(value or "")
+                except ValueError:
+                    _LOGGER.error('"%s" is not a hex byte string', value)
+                    return
+                if not _byte_command:
+                    _LOGGER.error("You must specify a hex byte string")
+                    return
                 await self.command_service.async_send_command(_byte_command)
 
     def set_update_cb(self, cb):
@@ -1782,14 +1920,18 @@ class SonyAVR:
     @property
     def source(self):
         if self.state_service.source:
-            return SOURCE_MENU_MAP[self.state_service.source]
+            # Fork change: .get() based lookup, so feedback-only inputs such
+            # as Bluetooth do not raise KeyError
+            return source_name(self.state_service.source)
         else:
             return ""
 
     @property
     def mode(self):
         if self.state_service.sound_field:
-            return SOUND_FIELD_MENU_MAP[self.state_service.sound_field]
+            return SOUND_FIELD_MENU_MAP.get(
+                self.state_service.sound_field, self.state_service.sound_field
+            )
         else:
             return ""
 
