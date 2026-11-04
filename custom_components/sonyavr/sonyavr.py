@@ -200,6 +200,19 @@ CMD_VOLUME_MAX = bytearray([0x02, 0x06, 0xA0, 0x52, 0x00, 0x03, 0x00, 0x4A, 0x00
 CMD_VOLUME_UP = bytearray([0x02, 0x03, 0xA0, 0x55, 0x00, 0x08])
 CMD_VOLUME_DOWN = bytearray([0x02, 0x03, 0xA0, 0x56, 0x00, 0x07])
 
+# Fork change: status request (read only, with checksum). Function codes from
+# 0x80 are requests. The AVR answers with the input packet (see
+# FEEDBACK_SOURCE_MAP), which gives input, power and mute. Another fork
+# (kamkilt/sonyavr) confirmed this on an STR-DA5800ES, also in standby. Not yet
+# confirmed on volume model 3 (STR-DN1040); without an answer the startup
+# probe uses volume down (see SonyAVR._async_volume_probe).
+CMD_STATUS_REQUEST = bytearray([0x02, 0x03, 0xA0, 0x82, 0x00, 0xDB])
+# Seconds to wait for an answer to a probe
+PROBE_TIMEOUT = 1.5
+# On model 3 a second volume down while the volume display is open lowers the
+# volume, so do not send the volume probe again within this many seconds
+VOLUME_PROBE_INTERVAL = 10
+
 # three bytes follows:
 # - hours
 # - minutes
@@ -753,6 +766,7 @@ class StateService:
         self.auto_standby: bool | None = None
         self.auto_phase_matching: bool | None = None
         self.volume: float = 0
+        self._volume_reported = False
         self.zones: dict[int, ZoneState] = {zone: ZoneState() for zone in ZONE_BYTES}
 
     def update_power(self, power, state_only=False):
@@ -771,8 +785,12 @@ class StateService:
 
     def update_volume(self, vol):
         if self.initialized:
-            if vol > self.volume:
+            # Fork change: a volume increase means that the AVR is unmuted,
+            # but the first report is not an increase (the volume was not
+            # known yet). Before, the startup volume report set muted False.
+            if self._volume_reported and vol > self.volume:
                 self.muted = False
+            self._volume_reported = True
             self.volume = vol
             _LOGGER.debug("Volume State Updated to %s" % vol)
 
@@ -1152,6 +1170,28 @@ class FeedbackWatcher:
         self.reader: asyncio.StreamReader | None = None
         self.writer: asyncio.StreamWriter | None = None
         self._connected = False
+        # Fork change: count reports, so that a probe can see an answer
+        self.source_reports = 0
+        self.volume_reports = 0
+
+    async def async_send(self, cmd):
+        """Send a request on the feedback connection. True if it was sent.
+
+        Fork change: the AVR can answer a request on the requesting connection
+        only, and only this connection is parsed (the command connection is
+        read and the data discarded).
+        """
+        writer = self.writer
+        if writer is None or writer.is_closing():
+            return False
+        try:
+            writer.write(cmd)
+            await writer.drain()
+        except OSError as e:
+            _LOGGER.debug("Cannot send on feedback connection: %s", e)
+            return False
+        _LOGGER.debug("Request : %s", ", ".join([hex(byte) for byte in cmd]))
+        return True
 
     async def kill(self):
         self.ended = True
@@ -1161,6 +1201,7 @@ class FeedbackWatcher:
 
     async def check_volume(self, data):
         if FEEDBACK_VOLUME[0:5] == data[0:5] or FEEDBACK_VOLUME_1[0:5] == data[0:5]:
+            self.volume_reports += 1
             # Check if AVR is STR or not
             if self.state_service.volume_model is None:
                 _LOGGER.debug("Vol Max %s", self.state_service.volume_max)
@@ -1275,6 +1316,8 @@ class FeedbackWatcher:
                         binascii.hexlify(data[-3:], ":"),
                     )
                 source_switched = True
+        if source_switched:
+            self.source_reports += 1
         return source_switched
 
     @staticmethod
@@ -1672,6 +1715,7 @@ class SonyAVR:
         self._remote_update_cb = None
         self._sensor_update_cb = None
         self._zone_update_cbs = {}
+        self._last_volume_probe: float | None = None
 
         self.state_service.volume_model = None
         self.state_service.volume_min = 0
@@ -1861,41 +1905,98 @@ class SonyAVR:
     def set_sensor_update_cb(self, cb):
         self._sensor_update_cb = cb
 
-    async def async_update_status(self):
-        _LOGGER.debug("Updating Initial States")
-        if self.state_service.muted is None:
-            _LOGGER.debug("Initialising Mute State")
-            await self.command_service.async_mute()
-            await asyncio.sleep(1.0)
-            await self.command_service.async_unmute()
-            await asyncio.sleep(1.0)
+    async def _async_wait_for_report(self, counter, before):
+        """Wait until a feedback watcher counter is above before."""
+        loop = asyncio.get_running_loop()
+        end = loop.time() + PROBE_TIMEOUT
+        while getattr(self.feedback_watcher, counter) <= before:
+            if loop.time() >= end:
+                return False
+            await asyncio.sleep(0.1)
+        return True
+
+    async def async_request_status(self):
+        """Ask for input, power and mute with the read-only status request.
+
+        Fork change (see CMD_STATUS_REQUEST). True when the AVR answered.
+        """
+        watcher = self.feedback_watcher
+        for _ in range(30):
+            # At startup the feedback connection can still be opening
+            if watcher.writer is not None:
+                break
+            await asyncio.sleep(0.1)
+        before = watcher.source_reports
+        if not await watcher.async_send(CMD_STATUS_REQUEST):
+            return False
+        if await self._async_wait_for_report("source_reports", before):
+            return True
+        _LOGGER.debug("No answer to the status request")
+        return False
+
+    async def _async_volume_probe(self):
+        """Make the AVR report its volume. True when the AVR answered.
+
+        Fork change. On volume model 3 the first volume down only opens the
+        volume display; the volume does not change. On model 1 it lowers the
+        volume by 0.5 dB, and volume up sets it back. A second volume down
+        while the display is open lowers the volume, so the probe is not sent
+        again within VOLUME_PROBE_INTERVAL seconds.
+        """
+        now = asyncio.get_running_loop().time()
+        if (
+            self._last_volume_probe is not None
+            and now - self._last_volume_probe < VOLUME_PROBE_INTERVAL
+        ):
+            _LOGGER.debug("Volume probe sent less than %d s ago", VOLUME_PROBE_INTERVAL)
+            return False
+        self._last_volume_probe = now
         _LOGGER.debug("Initialising Volume State")
+        before = self.feedback_watcher.volume_reports
         await self.command_service.async_send_command(CMD_VOLUME_DOWN)
-        await asyncio.sleep(1.0)
-        if self.state_service.volume_model == 1:
+        answered = await self._async_wait_for_report("volume_reports", before)
+        if answered and self.state_service.volume_model == 1:
             # With model 3, volume down only works with volume menu active, up is only needed on == 1
             await self.command_service.async_send_command(CMD_VOLUME_UP)
             await asyncio.sleep(1.0)
-        if self.state_service.source is None:
-            _LOGGER.debug("Initialising Source State")
-            await self.command_service.async_source_up()
-            await asyncio.sleep(2.0)
-            await self.command_service.async_source_down()
-            await asyncio.sleep(2.0)
+        return answered
+
+    async def async_update_status(self):
+        """Make the AVR report its state, without changing it.
+
+        Fork change: upstream sent mute and then unmute when mute was not
+        known (an AVR that was muted became unmuted), and input up and down
+        when the input was not known (these sent nothing, because they need a
+        known input). Now: the status request, then the volume probe when the
+        AVR is not known to be off.
+        """
+        _LOGGER.debug("Updating Initial States")
+        await self.async_request_status()
+        if self.state_service.power is not False:
+            await self._async_volume_probe()
 
     async def async_get_power_state(self):
-        _LOGGER.debug("Getting Power State")
-        await self.command_service.async_send_command(CMD_MUTE)
-        await asyncio.sleep(1.0)
+        """Find out if the AVR is on, without changing what it plays.
 
-        if self.state_service.muted is None:
-            _LOGGER.debug("No response from AVR, so assuming power is off")
-            return False
-        else:
-            _LOGGER.debug("AVR responded to mute, so is powered on")
-            await self.command_service.async_send_command(CMD_UNMUTE)
-            await asyncio.sleep(1.0)
+        Fork change: upstream sent mute and then unmute. That muted the sound
+        for about 1 s and unmuted an AVR that was muted. Now send the status
+        request. When the AVR does not answer it, use the volume probe: an
+        answer means that the AVR is on, but input and mute stay unknown
+        until the AVR reports them. Never send mute, input or power commands.
+        """
+        _LOGGER.debug("Getting Power State")
+        if await self.async_request_status():
+            _LOGGER.debug(
+                "AVR answered the status request, power %s",
+                self.state_service.power,
+            )
+            return bool(self.state_service.power)
+        if await self._async_volume_probe():
+            _LOGGER.debug("AVR answered volume down, so is powered on")
+            self.state_service.update_power(True)
             return True
+        _LOGGER.debug("No response from AVR, so assuming power is off")
+        return False
 
     async def run_notifier(self):
         _LOGGER.debug("Setting up Sony AVR Notify Listener")

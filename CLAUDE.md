@@ -72,9 +72,21 @@ Protocol notes:
   checksum byte. A full packet is N + 3 bytes. Some feedback constants in
   the code are N + 2 bytes (no checksum), so the frame splitter accepts
   both.
-- There is no status query. At startup the integration gets state by sending
-  harmless commands (mute and unmute, volume down, input up and down) and
-  reading the feedback.
+- Byte 2 is the category (`0xA0` amplifier commands, `0xA8` amplifier
+  feedback). Byte 3 is the function: below `0x80` sets a value (`0x42`
+  input, `0x53` mute, `0x56` volume down, `0x60` power), from `0x80` it is a
+  status (`0x82` input, `0x92` volume).
+- The input packet (`02 07 A8 82 00 <input> 00 <status> ...`) gives input,
+  power (status bit 0) and mute (status bit 1). The AVR sends it when input,
+  mute or power changes.
+- Status request (fork change 13): `02 03 A0 82 00 DB` asks for the input
+  packet without changing anything. Confirmed on an STR-DA5800ES (also in
+  standby) by another fork, `kamkilt/sonyavr`. **Not yet confirmed on the
+  STR-DN1040.** The integration sends it on the feedback connection, because
+  only that connection is parsed.
+- Volume down on volume model 3 only opens the volume display (the volume
+  does not change). A second volume down while the display is open lowers
+  the volume by one step.
 - Volume model 3 (STR-DN1040 and similar): integer steps, default cap
   `MAX_VOLUME = 45`. Volume model 1 (STR-DA5800ES and similar): dB in 0.5
   steps.
@@ -95,6 +107,8 @@ Protocol notes:
 | 10 | TCP keepalive on both sockets. | Detects a dead connection (for example AVR power loss) without traffic. |
 | 11 | Config flow: unique ID (host) and a connection test. | Prevents duplicate entries and gives a clear error when the AVR is not reachable. |
 | 12 | Removed the unused local IP lookup (UDP connect to 8.8.8.8). | Dead code. It sent no packets, but it looked like an external connection. |
+| 13 | Startup probe without mute or input commands. First the status request (input, power, mute). If the AVR does not answer it, one volume down (power and volume only; input and mute stay unknown until the AVR reports them). The volume probe is not sent twice within 10 s. | Upstream sent mute then unmute (1 s of silence, and a muted AVR became unmuted). Its input up and down step sent nothing (it needs a known input), so it only waited 4 s. |
+| 14 | The first volume report does not set mute to off. | Upstream treats a volume increase as "unmuted", and the first report counted as an increase from 0. Upstream hid this with the mute probe. |
 
 The splitter only changes a read when the whole read divides exactly into
 valid packets. In all other cases it passes the read unchanged (upstream
@@ -119,8 +133,15 @@ not need HA. `smoke_protocol.py` copies `sonyavr.py`, `const.py` and
 `feedback_frames.py` into a temporary package (`sonyavr.py` has no HA
 imports) and checks: two packets in one TCP read, Bluetooth source name,
 the volume cap, "Set Volume" with a text value, and the ping interval
-default. The config flow and entities have no automatic test; test them in
-HA.
+default. It also runs the startup probe (as `media_player._async_startup`
+calls it) against a fake model 3 AVR, on and muted or in standby, with and
+without an answer to the status request. It checks the learned state, that
+the fake AVR did not change, that no mute, input or power command was sent,
+and that at most one volume down was sent. The config flow and entities
+have no automatic test; test them in HA.
+
+On Windows the venv paths are `venv\Scripts\python`. Install the wheel from
+a file after you compare its SHA-256 with the pin above.
 
 `ruff check` reports 22 findings in upstream code (24 before the fork
 changes). The fork does not reformat upstream code, so that the diff stays
@@ -184,18 +205,27 @@ Merge only after you review the diff (see Security rules). Check
   not set yet (cap 45). The first HACS GitHub sign-in failed with
   `could_not_register` ("The device_code provided is not valid"). The
   second try worked. Live tests not done yet.
+- 4 Nov 2026: fork changes 13 and 14 (startup probe) on branch
+  `claude/vigilant-noether-48abf1`, pull request to `main` open, not
+  merged. Syntax check, frame tests (10/10) and protocol smoke test (9/9)
+  pass; the new startup tests fail on the old code (a muted AVR became
+  unmuted). Not yet tested on the STR-DN1040.
 
 ## Known issues
 
-- **Startup state probe.** There is no status query, so at each HA start
-  with the AVR on, the integration sends mute, then unmute, then (when the
-  input is not known) input up and input down (`async_get_power_state` and
-  `async_update_status` in `sonyavr.py`, upstream code). Result: a 1 s
-  mute, about 4 s on a different input, and an AVR that was muted becomes
-  unmuted. This fails the "spouse and grandparent test". Find a probe that
-  does not change the state. For example, on volume model 3 the volume-down
-  command only shows the volume; check if its feedback also gives power,
-  mute and input.
+- **Startup probe on the STR-DN1040 (fork change 13, not live tested).**
+  Two things are not known for this model: (1) whether it answers the
+  status request; (2) whether a standby AVR stays silent on volume down. If
+  (1) fails, after each HA restart the input and mute show as unknown until
+  the AVR reports a change (the Family Room dashboard uses the input). If
+  (2) fails and (1) fails too, HA shows the AVR as on while it is in standby.
+  See Next steps for the live test.
+- **Volume cap at startup.** The startup volume probe reports the volume.
+  When it is above Max Volume (for example after the knob was turned while
+  HA was down), the integration sets it back to Max Volume. This is the
+  Max Volume option working as intended, but it is a change at HA start.
+- `SonyAVR.async_poll_state` (upstream, not called anywhere) still sends
+  mute, unmute and input up and down. Do not call it.
 - **Marketplace and releases.** HA 2026.11 Marketplace gives stable
   releases only by default. The fork has no releases. After the HA update,
   check that Marketplace still finds updates on `main`. If not, publish a
@@ -212,10 +242,26 @@ Merge only after you review the diff (see Security rules). Check
    after an AVR power loss.
 2. Set Max Volume (Peter wants a value much lower than 45). Configure →
    Show: hide the inputs that are not used.
-3. Fix the startup state probe (see Known issues).
+3. Live test of the startup probe (fork change 13), when nobody is
+   watching. Turn on debug logging for `custom_components.sonyavr`. Before
+   each step, note the volume number on the AVR display.
+   a. AVR on, input TV, not muted: reload the integration. The sound must
+      not stop, the input must not change, the AVR display may show the
+      volume for a few seconds, and the volume number must stay the same.
+      In the log, find `Request : 0x2, 0x3, 0xa0, 0x82, 0x0, 0xdb`. Then
+      either `Source matched` and `Power/Mute` lines (the DN1040 answers
+      the status request) or `No answer to the status request`.
+   b. Same with the AVR muted: it must stay muted. If the status request
+      is answered, HA shows muted; if not, mute is unknown.
+   c. AVR in standby: reload. The AVR must stay off and HA must show off.
+   d. Restart HA (not only reload) once in state a. The Family Room
+      dashboard must show the right input (only if the status request is
+      answered).
+   e. If the status request is answered, later work could use it to poll
+      the state now and then (as `kamkilt/sonyavr` does every 15 s).
 4. After the HA 2026.11 update: check Marketplace updates (see Known
    issues).
 5. If the tests pass, think about pull requests to upstream for fixes 1, 2,
-   4, 5 and 8.
+   4, 5, 8, 13 and 14.
 6. Possible later work: a reconfigure step (change IP without removing the
    entry).
