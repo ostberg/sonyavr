@@ -128,15 +128,28 @@ small.
 
 ## Install (HACS)
 
+HACS itself: on HA 2026.10 and older, install the "Get HACS" app (app
+repository `https://github.com/hacs/addons`), start it, restart HA, then add
+the HACS integration (GitHub device sign-in). From HA 2026.11, HACS is built
+into HA as Settings → Marketplace. Use "Add from link" there instead of
+Custom repositories. HACS custom repositories and downloads move to
+Marketplace when HA updates.
+
 1. HACS → three-dot menu → Custom repositories → URL
    `https://github.com/ostberg/sonyavr`, type Integration → Add.
-2. Download "Sony AVR" from HACS. Restart HA.
+2. Download "Sony AVR" from HACS. Restart HA. HACS shows two "Sony AVR"
+   entries: upstream `peteS-UK/sonyavr` and this fork. Download the fork
+   (custom). The fork has no releases, so HACS downloads the latest commit
+   on `main`. Each new commit on `main` shows in HA as an update.
 3. Settings → Devices & services → Add integration → Sony AVR. Host = AVR IP
    (use a DHCP reservation), Name, Model `STR-DN1040`, Port `33335`.
 4. On the AVR: Network Standby **On** (the menu shows only on the Home
    Network or SEN input). Otherwise the AVR is not reachable when it is in
    standby.
 5. Configure → Config: set Max Volume. Leave "Initialize by power cycle" off.
+   Max Volume is in AVR volume steps (the number on the AVR display). When
+   it is not set, the cap is 45. The HA volume slider goes from 0 to Max
+   Volume.
 6. Configure → Show: hide the inputs that are not used.
 
 ## Sync with upstream
@@ -161,12 +174,48 @@ Merge only after you review the diff (see Security rules). Check
   tested on the STR-DN1040.
 - 3 Nov 2026: pull request #1 merged into `main` (merge commit). HACS
   installs from `main`, so the fixes are ready to install.
+- 4 Nov 2026: installed on Peter's HA (HA OS, Core 2026.10.4) with HACS
+  2.0.5, commit `a2f2b2e`. The files in HA match `main`. The setup and its
+  connection test passed. Device "Family Room AVR" (area Family Room).
+  Entities: `media_player.sonyavr`, `remote.sonyavr`,
+  `sensor.sonyavr_volume`. Power, input and volume feedback work (HA showed
+  a volume change from 13 to 6). The AVR has a DHCP reservation.
+  Options: ping interval 60 s, "Initialize by power cycle" off, Max Volume
+  not set yet (cap 45). The first HACS GitHub sign-in failed with
+  `could_not_register` ("The device_code provided is not valid"). The
+  second try worked. Live tests not done yet.
+
+## Known issues
+
+- **Startup state probe.** There is no status query, so at each HA start
+  with the AVR on, the integration sends mute, then unmute, then (when the
+  input is not known) input up and input down (`async_get_power_state` and
+  `async_update_status` in `sonyavr.py`, upstream code). Result: a 1 s
+  mute, about 4 s on a different input, and an AVR that was muted becomes
+  unmuted. This fails the "spouse and grandparent test". Find a probe that
+  does not change the state. For example, on volume model 3 the volume-down
+  command only shows the volume; check if its feedback also gives power,
+  mute and input.
+- **Marketplace and releases.** HA 2026.11 Marketplace gives stable
+  releases only by default. The fork has no releases. After the HA update,
+  check that Marketplace still finds updates on `main`. If not, publish a
+  release (for example `v2.0.0-ostberg.1`).
+- **Second AVR device in HA.** HA also has a DLNA Digital Media Renderer
+  device for the same AVR ("Family Room Receiver",
+  `media_player.str_dn1040_6274c9`). It is a different integration (media
+  streaming only). It does not control power, volume or input.
 
 ## Next steps
 
-1. Install with HACS and test on the STR-DN1040: power, mute, volume,
-   input, Max Volume cap, behavior after an AVR power loss.
-2. If the tests pass, think about pull requests to upstream for fixes 1, 2,
+1. Live tests on the STR-DN1040: power on from standby, power off, mute,
+   volume, input, Max Volume cap (turn the knob above the cap), behavior
+   after an AVR power loss.
+2. Set Max Volume (Peter wants a value much lower than 45). Configure →
+   Show: hide the inputs that are not used.
+3. Fix the startup state probe (see Known issues).
+4. After the HA 2026.11 update: check Marketplace updates (see Known
+   issues).
+5. If the tests pass, think about pull requests to upstream for fixes 1, 2,
    4, 5 and 8.
-3. Possible later work: a reconfigure step (change IP without removing the
+6. Possible later work: a reconfigure step (change IP without removing the
    entry).
