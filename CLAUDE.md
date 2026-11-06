@@ -76,9 +76,15 @@ Protocol notes:
   feedback). Byte 3 is the function: below `0x80` sets a value (`0x42`
   input, `0x53` mute, `0x56` volume down, `0x60` power), from `0x80` it is a
   status (`0x82` input, `0x92` volume).
-- The input packet (`02 07 A8 82 00 <input> 00 <status> ...`) gives input,
+- The input packet (`02 07 A8 82 00 <input> <x> <status> ...`) gives input,
   power (status bit 0) and mute (status bit 1). The AVR sends it when input,
-  mute or power changes.
+  mute or power changes. On the STR-DN1040 byte `<x>` is `0x1C` (seen with
+  the TV input; meaning unknown).
+- Sound mode feedback is `02 04 AB 82 <mode> 00`. No packet that reports the
+  audio input format (Dolby, PCM stereo) is known (checked 6 Nov 2026). The
+  DN1040's other network interfaces don't give it either: its web page is
+  network setup only, and its Sony remote interface (`/cers/getStatus` on
+  port 50001) reports only the input.
 - Status request (fork change 13): `02 03 A0 82 00 DB` asks for the input
   packet without changing anything. Confirmed on an STR-DA5800ES (also in
   standby) by another fork, `kamkilt/sonyavr`. **Not yet confirmed on the
@@ -230,6 +236,13 @@ Merge only after you review the diff (see Security rules). Check
     command or a report.
   - At HA start HA shows the AVR as off for about 13 s until the probe ends
     (the HA automations wait 20-30 s before acting on "off").
+
+- 6 Nov 2026: Peter reports the sound mode jumping to Multi Stereo. HA's
+  history shows three jumps on 5–6 Nov that no HA automation made. Debug
+  logging for `custom_components.sonyavr` turned on in HA (until the next
+  restart) to see whether the jumps come with a command from HA and whether
+  the AVR sends an unknown packet when the audio format changes. Details:
+  `code/home-assistant/docs/family-room-av.md`.
 
 ## Known issues
 
