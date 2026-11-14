@@ -243,6 +243,12 @@ Merge only after you review the diff (see Security rules). Check
   restart) to see whether the jumps come with a command from HA and whether
   the AVR sends an unknown packet when the audio format changes. Details:
   `code/home-assistant/docs/family-room-av.md`.
+- 13 Nov 2026: HA updated to 2026.11.0 on 7 Nov (HACS became Marketplace;
+  see Known issues). The 6 Nov debug log (9:57 AM to 10:32 PM, four TV
+  sessions) shows only input/power (`A8 82`, byte 6 always `0x1C`), volume
+  (`A8 92`) and tuner (`A9 82`) packets: no unknown packet. No jump to Multi
+  Stereo from 6 to 13 Nov. The update restart turned debug logging off; it
+  was turned on again on 13 Nov. Installed version `bf9c175` (fork change 15).
 
 ## Known issues
 
@@ -259,10 +265,15 @@ Merge only after you review the diff (see Security rules). Check
   Max Volume option working as intended, but it is a change at HA start.
 - `SonyAVR.async_poll_state` (upstream, not called anywhere) still sends
   mute, unmute and input up and down. Do not call it.
-- **Marketplace and releases.** HA 2026.11 Marketplace gives stable
-  releases only by default. The fork has no releases. After the HA update,
-  check that Marketplace still finds updates on `main`. If not, publish a
-  release (for example `v2.0.0-ostberg.1`).
+- **Marketplace and releases.** Checked 13 Nov 2026 on HA 2026.11.0:
+  Marketplace still finds commits on `main` without a release
+  (`update.sony_avr_update` offered `108be03`, installed `bf9c175`). Updates
+  from Marketplace fail ("Open the Marketplace and read the warning first")
+  until Peter accepts its first-visit risk notice.
+- **Deprecated constant.** HA 2026.11 logs a warning that
+  `config_flow.py` uses `CONN_CLASS_LOCAL_PUSH` (`CONNECTION_CLASS = ...`),
+  which HA removes in 2027.5.0. Remove that line before then (upstream code;
+  HA no longer reads it).
 - **Second AVR device in HA.** HA also has a DLNA Digital Media Renderer
   device for the same AVR ("Family Room Receiver",
   `media_player.str_dn1040_6274c9`). It is a different integration (media
@@ -295,8 +306,8 @@ Merge only after you review the diff (see Security rules). Check
       answered).
    e. If the status request is answered, later work could use it to poll
       the state now and then (as `kamkilt/sonyavr` does every 15 s).
-4. After the HA 2026.11 update: check Marketplace updates (see Known
-   issues).
+4. Done 13 Nov 2026: Marketplace finds updates on `main` (see Known
+   issues). Still to do: remove the deprecated `CONNECTION_CLASS` line.
 5. If the tests pass, think about pull requests to upstream for fixes 1, 2,
    4, 5, 8, 13 and 14.
 6. Possible later work: a reconfigure step (change IP without removing the
