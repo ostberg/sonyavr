@@ -268,8 +268,9 @@ Merge only after you review the diff (see Security rules). Check
 - **Marketplace and releases.** Checked 13 Nov 2026 on HA 2026.11.0:
   Marketplace still finds commits on `main` without a release
   (`update.sony_avr_update` offered `108be03`, installed `bf9c175`). Updates
-  from Marketplace fail ("Open the Marketplace and read the warning first")
-  until Peter accepts its first-visit risk notice.
+  from Marketplace failed ("Open the Marketplace and read the warning first")
+  until Peter accepted its risk notice on 13 Nov 2026 (it shows only on
+  Settings → Marketplace). No update installed through Marketplace yet.
 - **Deprecated constant.** HA 2026.11 logs a warning that
   `config_flow.py` uses `CONN_CLASS_LOCAL_PUSH` (`CONNECTION_CLASS = ...`),
   which HA removes in 2027.5.0. Remove that line before then (upstream code;
